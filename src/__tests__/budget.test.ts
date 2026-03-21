@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createBudget } from '../budget.js';
-import { BudgetConfigError, UnknownModelError } from '../errors.js';
+import { BudgetConfigError, BudgetExceededError, UnknownModelError } from '../errors.js';
 
 describe('createBudget validation', () => {
   describe('contextWindow / model mutual exclusion', () => {
@@ -265,19 +265,364 @@ describe('createBudget validation', () => {
       expect(budget.config).toBe(config);
     });
 
-    it('allocate throws not implemented', () => {
+    it('allocate returns an AllocationResult', () => {
       const budget = createBudget({ contextWindow: 8192, sections: { system: {} } });
-      expect(() => budget.allocate()).toThrow('not implemented');
+      const result = budget.allocate();
+      expect(result).toBeDefined();
+      expect(result.totalBudget).toBe(8192);
     });
 
-    it('fit throws not implemented', () => {
+    it('fit returns a FittedContent', () => {
       const budget = createBudget({ contextWindow: 8192, sections: { system: {} } });
-      expect(() => budget.fit({ system: 'hello' })).toThrow('not implemented');
+      const result = budget.fit({ system: 'hello' });
+      expect(result).toBeDefined();
+      expect(result.sections).toHaveLength(1);
     });
 
-    it('report throws not implemented', () => {
+    it('report returns a BudgetReport', () => {
       const budget = createBudget({ contextWindow: 8192, sections: { system: {} } });
-      expect(() => budget.report({ system: 'hello' })).toThrow('not implemented');
+      const result = budget.report({ system: 'hello' });
+      expect(result).toBeDefined();
+      expect(result.totalBudget).toBe(8192);
     });
+  });
+});
+
+describe('allocate()', () => {
+  it('returns correct totalBudget, outputReservation, and availableBudget', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      outputReservation: 1000,
+      sections: { system: { basis: 0 } },
+    });
+    const result = budget.allocate();
+    expect(result.totalBudget).toBe(10000);
+    expect(result.outputReservation).toBe(1000);
+    expect(result.availableBudget).toBe(9000);
+  });
+
+  it('allocates fixed basis sections with grow:0 and no extras', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: {
+        system: { basis: 2000, grow: 0 },
+        memory: { basis: 3000, grow: 0 },
+      },
+    });
+    const result = budget.allocate();
+    const systemSec = result.sections.find((s) => s.name === 'system')!;
+    const memorySec = result.sections.find((s) => s.name === 'memory')!;
+    // Basis-only sections with grow:0 get exactly their basis tokens
+    expect(systemSec.allocated).toBe(2000);
+    expect(memorySec.allocated).toBe(3000);
+  });
+
+  it('distributes remaining tokens proportionally by grow factor', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: {
+        system: { basis: 0, grow: 1 },
+        memory: { basis: 0, grow: 3 },
+      },
+    });
+    const result = budget.allocate();
+    const systemSec = result.sections.find((s) => s.name === 'system')!;
+    const memorySec = result.sections.find((s) => s.name === 'memory')!;
+    // system gets 1/4, memory gets 3/4 of 10000
+    expect(systemSec.allocated).toBeCloseTo(2500, -1);
+    expect(memorySec.allocated).toBeCloseTo(7500, -1);
+  });
+
+  it('handles percentage basis sections with grow:0', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: {
+        system: { basis: '20%', grow: 0 },
+        memory: { basis: '30%', grow: 0 },
+      },
+    });
+    const result = budget.allocate();
+    const systemSec = result.sections.find((s) => s.name === 'system')!;
+    const memorySec = result.sections.find((s) => s.name === 'memory')!;
+    // percentage of 10000: system=2000, memory=3000
+    expect(systemSec.allocated).toBe(2000);
+    expect(memorySec.allocated).toBe(3000);
+  });
+
+  it('handles a mix of fixed, percentage, and flex sections', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: {
+        system: { basis: 1000, grow: 0 },      // fixed: 1000, no growth
+        rag: { basis: '20%', grow: 0 },         // percentage: 2000, no growth
+        conversation: { basis: 0, grow: 1 },    // flex: absorbs remaining 7000
+      },
+    });
+    const result = budget.allocate();
+    const systemSec = result.sections.find((s) => s.name === 'system')!;
+    const ragSec = result.sections.find((s) => s.name === 'rag')!;
+    const convSec = result.sections.find((s) => s.name === 'conversation')!;
+    expect(systemSec.allocated).toBe(1000);
+    expect(ragSec.allocated).toBe(2000);
+    expect(convSec.allocated).toBe(7000);
+  });
+
+  it('respects max cap on sections', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: {
+        system: { basis: 0, grow: 1, max: 1000 },
+        memory: { basis: 0, grow: 1 },
+      },
+    });
+    const result = budget.allocate();
+    const systemSec = result.sections.find((s) => s.name === 'system')!;
+    expect(systemSec.allocated).toBeLessThanOrEqual(1000);
+  });
+
+  it('throws BudgetExceededError when section minimums exceed available budget', () => {
+    expect(() =>
+      createBudget({
+        contextWindow: 1000,
+        sections: {
+          system: { basis: 0, min: 600 },
+          memory: { basis: 0, min: 600 },
+        },
+      }).allocate(),
+    ).toThrow(BudgetExceededError);
+
+    try {
+      createBudget({
+        contextWindow: 1000,
+        sections: {
+          system: { basis: 0, min: 600 },
+          memory: { basis: 0, min: 600 },
+        },
+      }).allocate();
+    } catch (e) {
+      expect(e).toBeInstanceOf(BudgetExceededError);
+      const err = e as BudgetExceededError;
+      expect(err.availableBudget).toBe(1000);
+      expect(err.requiredMinimum).toBe(1200);
+    }
+  });
+
+  it('honours explicit sectionOverrides passed to allocate()', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: { system: {}, memory: {} },
+    });
+    const result = budget.allocate({ system: 3000, memory: 2000 });
+    const systemSec = result.sections.find((s) => s.name === 'system')!;
+    const memorySec = result.sections.find((s) => s.name === 'memory')!;
+    expect(systemSec.allocated).toBe(3000);
+    expect(memorySec.allocated).toBe(2000);
+  });
+
+  it('section allocation objects have expected shape', () => {
+    const budget = createBudget({
+      contextWindow: 8192,
+      sections: { system: { basis: 1000, priority: 90 } },
+    });
+    const result = budget.allocate();
+    expect(result.sections).toHaveLength(1);
+    const sec = result.sections[0];
+    expect(sec).toHaveProperty('name');
+    expect(sec).toHaveProperty('basis');
+    expect(sec).toHaveProperty('allocated');
+    expect(sec).toHaveProperty('min');
+    expect(sec).toHaveProperty('max');
+    expect(sec).toHaveProperty('priority');
+    expect(sec).toHaveProperty('overflow');
+    expect(sec).toHaveProperty('truncation');
+  });
+
+  it('total allocations do not exceed availableBudget (overflowed=false)', () => {
+    // Use custom section names (not built-in) so defaults apply cleanly
+    // Custom defaults: basis=0, grow=0, shrink=1
+    const budget = createBudget({
+      contextWindow: 10000,
+      outputReservation: 500,
+      sections: {
+        sysBlock: { basis: '10%', grow: 0 },
+        memBlock: { basis: '20%', grow: 0 },
+        convBlock: { basis: 0, grow: 1 },
+      },
+    });
+    const result = budget.allocate();
+    const total = result.sections.reduce((s, sec) => s + sec.allocated, 0);
+    expect(total).toBeLessThanOrEqual(result.availableBudget);
+    expect(result.overflowed).toBe(false);
+  });
+});
+
+describe('fit()', () => {
+  it('passes through content that fits within budget', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const shortText = 'Hello world';
+    const result = budget.fit({ system: shortText });
+    expect(result.sections).toHaveLength(1);
+    const sec = result.sections[0];
+    expect(sec.content).toBe(shortText);
+    expect(sec.truncated).toBe(false);
+  });
+
+  it('truncates content that exceeds the section budget', () => {
+    // Give system only 10 tokens (=~40 chars) budget
+    const budget = createBudget({
+      contextWindow: 100,
+      sections: { system: { basis: 10 } },
+    });
+    // 200 chars → ~50 tokens, exceeds 10-token budget
+    const longText = 'word '.repeat(40);
+    const result = budget.fit({ system: longText });
+    const sec = result.sections[0];
+    expect(sec.truncated).toBe(true);
+    expect(sec.content.endsWith('…')).toBe(true);
+    // Truncated content should be shorter than original
+    expect(sec.content.length).toBeLessThan(longText.length);
+  });
+
+  it('uses custom tokenCounter when provided', () => {
+    const counter = (text: string) => text.split(' ').length;
+    const budget = createBudget({
+      contextWindow: 10000,
+      tokenCounter: counter,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const text = 'one two three';
+    const result = budget.fit({ system: text });
+    expect(result.sections[0].tokens).toBe(counter(text));
+  });
+
+  it('sets totalTokens as sum of all section tokens', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: {
+        system: { basis: 0, grow: 1 },
+        memory: { basis: 0, grow: 1 },
+      },
+    });
+    const result = budget.fit({ system: 'hello', memory: 'world' });
+    const expected = result.sections.reduce((s, sec) => s + sec.tokens, 0);
+    expect(result.totalTokens).toBe(expected);
+  });
+
+  it('sets overflowed=true when any section was truncated', () => {
+    const budget = createBudget({
+      contextWindow: 100,
+      sections: { system: { basis: 5 } },
+    });
+    const longText = 'word '.repeat(50);
+    const result = budget.fit({ system: longText });
+    expect(result.overflowed).toBe(true);
+  });
+
+  it('sets overflowed=false when no section was truncated', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const result = budget.fit({ system: 'short' });
+    expect(result.overflowed).toBe(false);
+  });
+
+  it('returns empty string for sections not provided in content map', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: { system: {}, memory: {} },
+    });
+    const result = budget.fit({ system: 'hello' });
+    const memorySec = result.sections.find((s) => s.name === 'memory')!;
+    expect(memorySec.content).toBe('');
+    expect(memorySec.tokens).toBe(0);
+  });
+});
+
+describe('report()', () => {
+  it('returns BudgetReport with correct shape', () => {
+    const budget = createBudget({
+      contextWindow: 8192,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const result = budget.report({ system: 'hello world' });
+    expect(result).toHaveProperty('totalBudget');
+    expect(result).toHaveProperty('used');
+    expect(result).toHaveProperty('remaining');
+    expect(result).toHaveProperty('utilizationPct');
+    expect(result).toHaveProperty('sections');
+    expect(Array.isArray(result.sections)).toBe(true);
+  });
+
+  it('section reports have correct shape', () => {
+    const budget = createBudget({
+      contextWindow: 8192,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const result = budget.report({ system: 'hello' });
+    const sec = result.sections[0];
+    expect(sec).toHaveProperty('name');
+    expect(sec).toHaveProperty('allocated');
+    expect(sec).toHaveProperty('used');
+    expect(sec).toHaveProperty('remaining');
+    expect(sec).toHaveProperty('utilizationPct');
+  });
+
+  it('totalBudget equals availableBudget from allocate()', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      outputReservation: 1000,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const rpt = budget.report({ system: 'hello' });
+    expect(rpt.totalBudget).toBe(9000);
+  });
+
+  it('remaining = totalBudget - used', () => {
+    const budget = createBudget({
+      contextWindow: 8192,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const rpt = budget.report({ system: 'hello world' });
+    expect(rpt.remaining).toBe(rpt.totalBudget - rpt.used);
+  });
+
+  it('utilizationPct is used/totalBudget * 100', () => {
+    const budget = createBudget({
+      contextWindow: 8192,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const rpt = budget.report({ system: 'hello world' });
+    expect(rpt.utilizationPct).toBeCloseTo((rpt.used / rpt.totalBudget) * 100, 5);
+  });
+
+  it('section used tokens match content token count for fitting content', () => {
+    const counter = (text: string) => text.split(' ').filter(Boolean).length;
+    const budget = createBudget({
+      contextWindow: 10000,
+      tokenCounter: counter,
+      sections: { system: { basis: 0, grow: 1 } },
+    });
+    const text = 'one two three four';
+    const rpt = budget.report({ system: text });
+    const sec = rpt.sections[0];
+    expect(sec.used).toBe(counter(text));
+  });
+
+  it('reports correct structure for multiple sections', () => {
+    const budget = createBudget({
+      contextWindow: 10000,
+      sections: {
+        system: { basis: 2000 },
+        memory: { basis: 3000 },
+      },
+    });
+    const rpt = budget.report({ system: 'sys content', memory: 'mem content' });
+    expect(rpt.sections).toHaveLength(2);
+    const names = rpt.sections.map((s) => s.name).sort();
+    expect(names).toEqual(['memory', 'system'].sort());
   });
 });

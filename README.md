@@ -50,6 +50,73 @@ const budget = createBudget({
 - `BudgetConfigError` if the configuration is invalid (all validation errors collected into a single throw).
 - `UnknownModelError` if the `model` string does not match any known or registered model.
 
+### `budget.allocate(sectionOverrides?: Record<string, number>): AllocationResult`
+
+Computes token allocations for all sections according to the flex-box algorithm:
+
+1. **Percentage basis** sections receive `basis%` of the available budget.
+2. **Numeric basis** sections receive their fixed `basis` tokens.
+3. **Auto / grow** sections share the remaining tokens proportionally by `grow` factor.
+4. All allocations are clamped to `[min, max]`.
+5. Throws `BudgetExceededError` if the sum of section `min` values exceeds the available budget.
+
+If `sectionOverrides` is provided, it bypasses the flex algorithm and uses those explicit token counts directly (still clamped to `[min, max]`).
+
+```ts
+const budget = createBudget({
+  contextWindow: 10000,
+  outputReservation: 1000,
+  sections: {
+    system: { basis: 1000, grow: 0 },   // fixed 1000 tokens
+    rag:    { basis: '20%', grow: 0 },  // 20% = 1800 tokens of 9000 available
+    reply:  { basis: 0, grow: 1 },      // absorbs remaining 7200 tokens
+  },
+});
+
+const result = budget.allocate();
+// result.totalBudget      → 10000
+// result.outputReservation → 1000
+// result.availableBudget   → 9000
+// result.sections[0]       → { name: 'system', allocated: 1000, ... }
+// result.overflowed         → false
+```
+
+### `budget.fit(sections: Record<string, string>): FittedContent`
+
+Given a map of section names to content strings, fits each section's content within its token budget (from `allocate()`). Content that exceeds its budget is truncated at a word boundary and suffixed with `…`.
+
+```ts
+const result = budget.fit({
+  system: 'You are a helpful assistant.',
+  rag: 'Retrieved document text...',
+  reply: 'Very long conversation history that may need truncation...',
+});
+
+// result.sections[0] → { name: 'system', content: '...', tokens: 7, truncated: false }
+// result.totalTokens  → sum of all section token counts
+// result.overflowed   → true if any section was truncated
+```
+
+A custom `tokenCounter` provided in `BudgetConfig` is used for counting; the default is `Math.ceil(text.length / 4)`.
+
+### `budget.report(sections: Record<string, string>): BudgetReport`
+
+Returns a utilization summary: how many tokens are allocated per section, how many were actually used by the provided content, and overall utilization percentages.
+
+```ts
+const rpt = budget.report({
+  system: 'You are a helpful assistant.',
+  rag: 'Retrieved doc...',
+  reply: 'Short reply.',
+});
+
+// rpt.totalBudget    → available tokens after outputReservation
+// rpt.used           → total tokens consumed across all sections
+// rpt.remaining      → totalBudget - used
+// rpt.utilizationPct → (used / totalBudget) * 100
+// rpt.sections       → per-section breakdown with allocated/used/remaining/utilizationPct
+```
+
 ### `getModelContextWindow(model: string): number | undefined`
 
 Returns the context window size for a known model name, or `undefined` if the model is not recognized. Resolves aliases automatically.
