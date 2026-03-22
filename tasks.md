@@ -228,4 +228,4 @@
 
 - [x] **Bump version in `package.json`** — Bump from `0.1.0` to `0.2.0` before publishing. | Status: done
 
-- [ ] **Verify zero runtime dependencies** — Confirm `package.json` has no `dependencies` field (or it is empty). All external packages are either `devDependencies` or the caller provides them. | Status: not_done
+- [x] **Verify zero runtime dependencies** — Confirm `package.json` has no `dependencies` field (or it is empty). All external packages are either `devDependencies` or the caller provides them. | Status: done
