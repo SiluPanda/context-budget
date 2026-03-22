@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createBudget } from '../budget.js';
-import { BudgetConfigError, BudgetExceededError, UnknownModelError } from '../errors.js';
+import { BudgetConfigError, BudgetExceededError, SectionOverflowError, UnknownModelError } from '../errors.js';
 
 describe('createBudget validation', () => {
   describe('contextWindow / model mutual exclusion', () => {
@@ -471,10 +471,10 @@ describe('fit()', () => {
   });
 
   it('truncates content that exceeds the section budget', () => {
-    // Give system only 10 tokens (=~40 chars) budget
+    // Give system only 10 tokens (=~40 chars) budget, with truncate overflow and tail truncation
     const budget = createBudget({
       contextWindow: 100,
-      sections: { system: { basis: 10 } },
+      sections: { system: { basis: 10, overflow: 'truncate', truncation: 'tail' } },
     });
     // 200 chars → ~50 tokens, exceeds 10-token budget
     const longText = 'word '.repeat(40);
@@ -514,7 +514,7 @@ describe('fit()', () => {
   it('sets overflowed=true when any section was truncated', () => {
     const budget = createBudget({
       contextWindow: 100,
-      sections: { system: { basis: 5 } },
+      sections: { system: { basis: 5, overflow: 'truncate' } },
     });
     const longText = 'word '.repeat(50);
     const result = budget.fit({ system: longText });
@@ -528,6 +528,53 @@ describe('fit()', () => {
     });
     const result = budget.fit({ system: 'short' });
     expect(result.overflowed).toBe(false);
+  });
+
+  it('throws SectionOverflowError when overflow is error and content exceeds budget', () => {
+    const budget = createBudget({
+      contextWindow: 100,
+      sections: { system: { basis: 5, overflow: 'error' } },
+    });
+    const longText = 'word '.repeat(50);
+    expect(() => budget.fit({ system: longText })).toThrow(SectionOverflowError);
+
+    try {
+      budget.fit({ system: longText });
+    } catch (e) {
+      const err = e as SectionOverflowError;
+      expect(err.section).toBe('system');
+      expect(err.allocated).toBe(5);
+      expect(err.actual).toBeGreaterThan(5);
+    }
+  });
+
+  it('truncates from the beginning with head truncation strategy', () => {
+    const budget = createBudget({
+      contextWindow: 100,
+      sections: { ctx: { basis: 10, overflow: 'truncate', truncation: 'head' } },
+    });
+    const longText = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa';
+    const result = budget.fit({ ctx: longText });
+    const sec = result.sections[0];
+    expect(sec.truncated).toBe(true);
+    expect(sec.content.startsWith('…')).toBe(true);
+    // Head truncation keeps the end — should contain later words
+    expect(sec.content).toContain('papa');
+  });
+
+  it('truncates from the middle with middle-out truncation strategy', () => {
+    const budget = createBudget({
+      contextWindow: 200,
+      sections: { ctx: { basis: 15, overflow: 'truncate', truncation: 'middle-out' } },
+    });
+    const longText = 'START one two three four five six seven eight nine ten eleven twelve END';
+    const result = budget.fit({ ctx: longText });
+    const sec = result.sections[0];
+    expect(sec.truncated).toBe(true);
+    expect(sec.content).toContain('…');
+    // Middle-out keeps start and end
+    expect(sec.content).toContain('START');
+    expect(sec.content).toContain('END');
   });
 
   it('returns empty string for sections not provided in content map', () => {

@@ -8,7 +8,7 @@ import type {
   FittedSection,
   SectionReport,
 } from './types.js';
-import { BudgetConfigError, BudgetExceededError, UnknownModelError } from './errors.js';
+import { BudgetConfigError, BudgetExceededError, SectionOverflowError, UnknownModelError } from './errors.js';
 import { getModelContextWindow } from './models.js';
 import { resolveAllSections } from './sections.js';
 
@@ -292,19 +292,59 @@ export function createBudget(config: BudgetConfig): ContextBudget {
           fitted.push({ name: sec.name, content, tokens: contentTokens, truncated: false });
           totalTokens += contentTokens;
         } else {
-          // Truncate: estimate chars per token, then find last word boundary
           anyOverflowed = true;
-          const charsPerToken = content.length / contentTokens;
-          const targetChars = Math.floor(budget * charsPerToken);
-          // Reserve room for the ellipsis (1 token ~ 4 chars, just use 1 char for '…')
-          const cutAt = Math.max(0, targetChars - 1);
-          let truncated = content.slice(0, cutAt);
-          // Snap to last word boundary
-          const lastSpace = truncated.lastIndexOf(' ');
-          if (lastSpace > 0) {
-            truncated = truncated.slice(0, lastSpace);
+
+          // Check overflow strategy — 'error' throws immediately
+          if (sec.overflow === 'error') {
+            throw new SectionOverflowError(
+              `Section "${sec.name}" content (${contentTokens} tokens) exceeds allocated budget (${budget} tokens)`,
+              sec.name,
+              budget,
+              contentTokens,
+            );
           }
-          truncated = truncated + '…';
+
+          // Truncate based on truncation strategy
+          const charsPerToken = content.length / contentTokens;
+          const targetChars = Math.max(0, Math.floor(budget * charsPerToken) - 1);
+          let truncated: string;
+
+          switch (sec.truncation) {
+            case 'head': {
+              // Keep the end, cut the beginning
+              const startAt = content.length - targetChars;
+              let sliced = content.slice(Math.max(0, startAt));
+              const firstSpace = sliced.indexOf(' ');
+              if (firstSpace > 0 && firstSpace < sliced.length / 2) {
+                sliced = sliced.slice(firstSpace + 1);
+              }
+              truncated = '…' + sliced;
+              break;
+            }
+            case 'middle-out': {
+              // Keep beginning and end, cut the middle
+              const halfChars = Math.floor(targetChars / 2);
+              let head = content.slice(0, halfChars);
+              const headSpace = head.lastIndexOf(' ');
+              if (headSpace > 0) head = head.slice(0, headSpace);
+              let tail = content.slice(content.length - halfChars);
+              const tailSpace = tail.indexOf(' ');
+              if (tailSpace > 0 && tailSpace < tail.length / 2) tail = tail.slice(tailSpace + 1);
+              truncated = head + ' … ' + tail;
+              break;
+            }
+            case 'tail':
+            case 'messages':
+            default: {
+              // Keep the beginning, cut the end (default behavior)
+              let sliced = content.slice(0, targetChars);
+              const lastSpace = sliced.lastIndexOf(' ');
+              if (lastSpace > 0) sliced = sliced.slice(0, lastSpace);
+              truncated = sliced + '…';
+              break;
+            }
+          }
+
           const truncatedTokens = Math.min(counter(truncated), budget);
           fitted.push({ name: sec.name, content: truncated, tokens: truncatedTokens, truncated: true });
           totalTokens += truncatedTokens;
