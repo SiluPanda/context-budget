@@ -3,6 +3,7 @@
 Token budget allocator for LLM context windows. Define sections of your prompt -- system, tools, memory, RAG, conversation -- assign flexbox-style grow/shrink factors, and let the allocator distribute your available token budget while respecting minimum/maximum constraints and priority-based triage.
 
 [![npm version](https://img.shields.io/npm/v/context-budget.svg)](https://www.npmjs.com/package/context-budget)
+[![npm downloads](https://img.shields.io/npm/dt/context-budget.svg)](https://www.npmjs.com/package/context-budget)
 [![license](https://img.shields.io/npm/l/context-budget.svg)](https://github.com/SiluPanda/context-budget/blob/master/LICENSE)
 [![node](https://img.shields.io/node/v/context-budget.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](https://www.typescriptlang.org/)
